@@ -1,0 +1,119 @@
+write train_vae.py
+project_dir: /home/ljeadec31/opt/ssl/levae
+use conda env flow
+
+exp dir format:
+exps/
+└── exp001/
+    ├── config.yaml
+    ├── checkpoints/
+    │   ├── last.ckpt
+    │   ├── step_00010000.pt
+    │   └── step_00020000.pt
+└── exp002/
+    ├── config.yaml
+    ├── checkpoints
+    ...
+
+default arguments using argparse
+- exps_dir
+- exp_name
+- config: config path
+
+config
+- load from args.config
+- save config like below (args.config)
+    - exps_dir / exp_name / config.yaml
+- if there exists config file in the experiment dir, and if it does not matches with the given config, raise error 
+- if args.config is not given and it's resuming run, load config from the experiment dir.
+- get global_batch_size instead of (micro) batch_size, where global_batch_size = micro_batch * accum_steps * world_size
+- vae_class: str (class name)
+- vae_config: dict (vae = vae_class(**vae_config))
+
+data: args.data_path (imagenet path)
+
+checkpoints
+- save path : exps_dir / exp_name / checkpoints / *.pt 
+- save last ckpt (last.pt) by every args.last_ckpt_every
+- save ckpt (e.g., 00100.pt) by every args.ckpt_every
+- resume last option: args.resume_last -> resume from last.ckpt (Find by exp_name with exps_dir)
+
+forward / loss
+- easy loss customize
+- loss_config
+- define sigreg if needed (should also save checkpoint)
+'''
+# if loss_config.get('sigreg_loss', {"use": False})["use"]:
+#     _cfg = loss_config['sigreg_loss']
+#     univariate_test = lejepa.univariate.EppsPulley(n_points=_cfg.get('n_points'))
+#     sigreg_fn = lejepa.multivariate.SlicingUnivariateTest(
+#         univariate_test=univariate_test, 
+#         num_slices=_cfg.get('num_slices')
+#     )
+#     self.sigreg_fn = sigreg_fn
+'''
+
+- step loss
+'''
+# out = vae(x, return_dict=True)
+# loss = 0.0
+# loss_log = {}
+
+# recon_loss = recon_loss_fn(x_normalized_pred, x_normalized)
+# loss += recon_loss * 1.0
+# loss_log["recon_loss"] = recon_loss.item()
+
+# # kld loss
+# if loss_config.get("kld_loss", {"use": False})["use"]:
+#     _loss_weight = loss_config["kld_loss"]["weight"]
+#     assert self.variational, "KLD loss is only applicable for variational VAE (variational=True)"
+#     _mu_gt, _std_gt = loss_config['kld_loss'].get('target_mu', 0.0), loss_config['kld_loss'].get('target_std', 1.0)
+#     # # KL( N(mu, sigma^2) || N(0, I) ) = -0.5 * (1 + logvar - mu^2 - exp(logvar))
+#     _var_gt, _logvar_gt = _std_gt ** 2, 2 * np.log(_std_gt)
+#     mu, logvar = mu.flatten(1), logvar.flatten(1)  # [B, latent_dim]
+#     logvar = torch.clamp(logvar, -30.0, 20.0)
+#     kld_loss = 0.5 * torch.sum(
+#         torch.pow(mu - _mu_gt, 2) / _var_gt
+#         + torch.exp(logvar) / _var_gt
+#         - 1.0
+#         - logvar
+#         + _logvar_gt,
+#         dim=[1],
+#     )
+#     kld_loss = kld_loss.mean()  # mean over batch
+#     # clamped_logvar = logvar.clamp(-30.0, 20.0)
+#     # kld_loss = -0.5 * torch.mean(
+#     #     1 + clamped_logvar - mu.pow(2) - clamped_logvar.exp()
+#     # )
+#     loss += kld_loss * _loss_weight
+#     loss_log["kld_loss"] = kld_loss.item()
+
+# if loss_config.get("sigreg_loss", {"use": False})["use"]:
+#     _loss_weight = loss_config["sigreg_loss"]["weight"]
+#     sigreg_loss = sigreg_fn(z.flatten(1))
+#     loss += sigreg_loss * _loss_weight
+#     loss_log["sigreg_loss"] = sigreg_loss.item()
+'''
+
+logging
+- log stats every args.log_every 
+- every args.visualize_every (default: log to wandb, optional to save local)
+- visualize visualize z with pca and x, x_pred_unnormalized.
+
+wandb (args.exp_name for run name)
+- args.wandb: use wandb 
+- args.wandb_key
+- args.wandb_entity
+- args.wandb_project
+
+
+
+DDP
+- use torch.distributed
+- using torchrun to run the code
+
+Autocast
+- support mixed precision bf16, fp32
+
+Grad acuum
+- support grad accum for larger batch size

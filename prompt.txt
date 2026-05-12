@@ -1,0 +1,13 @@
+refer to dinov3 (/home/ljeadec31/opt/ssl/dinov3)
+don't refer to other local dir
+
+goal: build variational autoencoder, based on ViT Architecture from dinov3. (masking no needed)
+
+conditions
+- do not call dinov3 library, write local code refering to dinov3, use rope embedding
+- make models/vae.py
+- latent_dim : after passing blocks of encoder, pass latent_proj
+- variational = True/False : make variational option
+- encode, decode methods. (forward should pass both encode decode)
+- img normalization and denorm should be optionally done in the encode / decode
+- patchify, unpatchify methods ( encode / decode should default activate this, but forward should not use this)

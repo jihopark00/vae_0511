@@ -1,0 +1,65 @@
+global_batch_size: 256
+precision: bf16
+
+vae_class: ViTVAE
+vae_config:
+  img_size: 256
+  patch_size: 16
+  in_chans: 3
+  # encoder
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  ffn_ratio: 4.0
+  # latent
+  latent_dim: 32
+  variational: true
+  # decoder
+  decoder_embed_dim: 768
+  decoder_depth: 12
+  decoder_num_heads: 12
+  # common
+  qkv_bias: true
+  norm_layer: layernorm           # 'layernorm' | 'layernormbf16' | 'rmsnorm'
+  init_values: null
+  # image normalization (applied inside the model)
+  img_mean: [0.5, 0.5, 0.5]
+  img_std:  [0.5, 0.5, 0.5]
+  # latent noise (training-time)
+  noisy_latent: false
+  noise_tau: 0.0
+  # register tokens
+  n_encoder_registers: 0
+  n_decoder_registers: 0
+
+train_config:
+  max_steps: 200000
+  accum_steps: 1
+  optimizer: adamw
+  lr: 1.0e-4
+  weight_decay: 0.05
+  betas: [0.9, 0.95]
+  scheduler: cosine               # 'cosine' | 'constant'
+  warmup_steps: 1000
+  min_lr: 1.0e-6
+  grad_clip: 1.0
+
+loss_config:
+  recon_loss:
+    type: l1                      # 'l1' | 'l2'
+    weight: 1.0
+  kld_loss:
+    use: false
+    weight: 1.0e-6
+    target_mu: 0.0
+    target_std: 1.0
+  sigreg_loss:
+    use: false
+    weight: 0.01
+    n_points: 17
+    num_slices: 512
+
+data_config:
+  img_size: 256                   # must equal vae_config.img_size
+  augmentation: none              # 'none' | 'random_resized_crop' | 'random_crop'
+  hflip: true

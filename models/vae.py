@@ -345,9 +345,12 @@ class ViTVAE(nn.Module):
         if self.noisy_latent and self.training:
             noise_sigma = self.noise_tau * torch.rand((z.size(0),) + (1,) * (len(z.shape) - 1), device=z.device)
             noise = noise_sigma * torch.randn_like(z)
-            z = z + noise
+            z_noisy = z + noise
+            _z = z_noisy
+        else:
+            _z = z
             
-        x_normalized_recon = self.decode(z, denormalize=False, patchify_latent=False)
+        x_normalized_recon = self.decode(_z, denormalize=False, patchify_latent=False)
         x_recon = x_normalized_recon * self.img_std + self.img_mean
         if return_dict:
             return {

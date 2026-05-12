@@ -125,14 +125,19 @@ def _yaml_normalize(d: dict) -> dict:
 def resolve_config(args: argparse.Namespace, exp_dir: Path) -> dict:
     saved_path = exp_dir / "config.yaml"
     given = load_yaml(Path(args.config)) if args.config else None
+
+    # Main writes the saved config first (if needed), then everyone reads.
+    # Without this barrier, non-main ranks race against main's write and may
+    # see saved as None even when main is about to create it.
+    if given is not None and is_main_process() and not saved_path.exists():
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        save_yaml(given, saved_path)
+    if dist.is_initialized():
+        dist.barrier()
+
     saved = load_yaml(saved_path) if saved_path.exists() else None
 
     if given is not None and saved is None:
-        if is_main_process():
-            exp_dir.mkdir(parents=True, exist_ok=True)
-            save_yaml(given, saved_path)
-        if dist.is_initialized():
-            dist.barrier()
         return _yaml_normalize(given)
 
     if given is not None and saved is not None:
@@ -300,6 +305,9 @@ def compute_loss(
     total = recon_loss * recon_cfg.get("weight", 1.0)
     logs: Dict[str, torch.Tensor] = {"recon_loss": recon_loss.detach()}
 
+    if logvar is not None:
+        logs["std_mean"] = torch.exp(0.5 * logvar.detach()).mean()
+
     kld_cfg = lc.get("kld_loss", {"use": False})
     if kld_cfg.get("use", False):
         assert model_unwrapped.variational, "KLD requires variational=True"
@@ -369,7 +377,7 @@ def load_ckpt(
     scheduler: torch.optim.lr_scheduler.LambdaLR,
     map_location: Any,
 ) -> Tuple[int, int]:
-    ckpt = torch.load(path, map_location=map_location)
+    ckpt = torch.load(path, map_location=map_location, weights_only=False)
     model_unwrapped.load_state_dict(ckpt["model"])
     optimizer.load_state_dict(ckpt["optimizer"])
     scheduler.load_state_dict(ckpt["scheduler"])
@@ -384,23 +392,30 @@ def load_ckpt(
 
 
 @torch.no_grad()
-def pca_visualize_z(z_sample: torch.Tensor, H_p: int, W_p: int) -> np.ndarray:
-    z_np = z_sample.float().cpu().numpy()
-    pca = PCA(n_components=3)
-    proj = pca.fit_transform(z_np)
-    lo = proj.min(0, keepdims=True)
-    hi = proj.max(0, keepdims=True)
-    proj = (proj - lo) / (hi - lo + 1e-8)
-    img = proj.reshape(H_p, W_p, 3)
-    return (img * 255).astype(np.uint8)
+def pca_visualize_z(z_batch: torch.Tensor, H_p: int, W_p: int) -> np.ndarray:
+    B = z_batch.shape[0]
+    z_np = z_batch.float().cpu().numpy()
+    imgs = np.empty((B, H_p, W_p, 3), dtype=np.float32)
+    for i in range(B):
+        proj = PCA(n_components=3).fit_transform(z_np[i])
+        lo = proj.min(0, keepdims=True)
+        hi = proj.max(0, keepdims=True)
+        proj = (proj - lo) / (hi - lo + 1e-8)
+        imgs[i] = proj.reshape(H_p, W_p, 3)
+    imgs_t = torch.from_numpy(imgs).permute(0, 3, 1, 2).float()
+    nrow = int(math.ceil(math.sqrt(B)))
+    grid = make_grid(imgs_t, nrow=nrow, padding=2)
+    grid_np = grid.numpy().transpose(1, 2, 0)
+    return (grid_np * 255).clip(0, 255).astype(np.uint8)
 
 
 @torch.no_grad()
-def make_recon_grid(x: torch.Tensor, x_recon: torch.Tensor, n: int = 8) -> torch.Tensor:
+def make_recon_grid(x: torch.Tensor, x_recon: torch.Tensor, n: int) -> torch.Tensor:
     n = min(n, x.size(0))
     pairs = torch.stack([x[:n], x_recon.clamp(0, 1)[:n]], dim=1)
     pairs = pairs.reshape(2 * n, *x.shape[1:])
-    return make_grid(pairs, nrow=2)
+    nrow = int(math.ceil(math.sqrt(2 * n)))
+    return make_grid(pairs, nrow=nrow)
 
 
 def log_visuals(
@@ -413,10 +428,15 @@ def log_visuals(
     wandb_run: Any,
 ) -> None:
     H_p, W_p = model_unwrapped.num_patches_h, model_unwrapped.num_patches_w
-    z_first = out_dict["z"][0]
-    pca_img = pca_visualize_z(z_first, H_p, W_p)
+    n = min(args.visualize_batch, x.size(0))
+    z_batch = out_dict["z"][:n]
+    pca_img = pca_visualize_z(z_batch, H_p, W_p)
 
-    grid = make_recon_grid(x.detach().cpu().float(), out_dict["x_recon"].detach().cpu().float())
+    grid = make_recon_grid(
+        x.detach().cpu().float(),
+        out_dict["x_recon"].detach().cpu().float(),
+        n=n,
+    )
     grid_np = grid.numpy().transpose(1, 2, 0)
     grid_uint = (grid_np * 255).clip(0, 255).astype(np.uint8)
 
@@ -477,6 +497,7 @@ def train_loop(
 
     t_log = time.time()
     samples_since_log = 0
+    steps_since_log = 0
 
     while step < max_steps:
         optimizer.zero_grad(set_to_none=True)
@@ -516,17 +537,20 @@ def train_loop(
         scheduler.step()
         step += 1
         samples_since_log += samples_per_step_global
+        steps_since_log += 1
 
         # logging
         if step % args.log_every == 0 and is_main_process():
             dt = time.time() - t_log
             sps = samples_since_log / max(1e-6, dt)
+            steps_per_sec = steps_since_log / max(1e-6, dt)
             lr_now = optimizer.param_groups[0]["lr"]
             parts = [
                 f"step {step:>7d}/{max_steps}",
                 f"lr={lr_now:.2e}",
                 f"gn={float(grad_norm):.3f}",
                 f"sps={sps:.1f}",
+                f"steps/s={steps_per_sec:.2f}",
             ]
             parts += [f"{k}={v:.4f}" for k, v in accum_log.items()]
             print("  ".join(parts), flush=True)
@@ -536,12 +560,14 @@ def train_loop(
                     "lr": lr_now,
                     "grad_norm": float(grad_norm),
                     "samples_per_sec": sps,
+                    "steps_per_sec": steps_per_sec,
                 }
                 for k, v in accum_log.items():
                     wandb_payload[f"loss/{k}"] = v
                 wandb_run.log(wandb_payload, step=step)
             t_log = time.time()
             samples_since_log = 0
+            steps_since_log = 0
 
         # visualization
         if step % args.visualize_every == 0 and is_main_process() and last_x is not None:
@@ -595,6 +621,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ckpt_every", type=int, default=10000)
     p.add_argument("--log_every", type=int, default=50)
     p.add_argument("--visualize_every", type=int, default=1000)
+    p.add_argument("--visualize_batch", type=int, default=8)
     p.add_argument("--save_visualizations_locally", action="store_true")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb_key", type=str, default=None)
@@ -655,6 +682,10 @@ def main(args: argparse.Namespace) -> None:
                 scheduler=scheduler,
                 map_location={"cuda:0": f"cuda:{local_rank}"},
             )
+            # load_ckpt restored RNG state from the rank-0 checkpoint, leaving
+            # all ranks identical. Re-seed per-rank (incorporating step so a
+            # resume doesn't replay the same sequence as the original run).
+            seed_everything(args.seed + start_step, rank)
             if is_main_process():
                 print(f"[resume] resumed from {last} at step {start_step}", flush=True)
         else:
@@ -663,10 +694,13 @@ def main(args: argparse.Namespace) -> None:
         dist.barrier()
 
     # Seed sigreg's projection counter so post-resume forwards don't reuse the
-    # pre-resume seeds. global_step is MAX-reduced across ranks each forward, so
-    # setting it identically on all ranks here is sufficient.
+    # pre-resume seeds. global_step advances once per forward (i.e. once per
+    # micro-batch), not once per train step, so scale by accum_steps to match
+    # what a continuous run would have at this train step. MAX-reduced across
+    # ranks each forward, so setting it identically here is sufficient.
     if sigreg_fn is not None:
-        sigreg_fn.global_step.fill_(start_step)
+        accum_steps = cfg["train_config"].get("accum_steps", 1)
+        sigreg_fn.global_step.fill_(start_step * accum_steps)
 
     wandb_run = None
     if args.wandb and is_main_process():

@@ -10,6 +10,7 @@ __pycache__/
 
 # Experiments / logs
 wandb/
+exps
 exps/
 runs/
 logs/
